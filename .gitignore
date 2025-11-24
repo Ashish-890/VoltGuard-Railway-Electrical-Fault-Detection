@@ -1,19 +1,10 @@
-# Virtual environment
+# Virtual environments
 .venv/
 venv/
 
-# Bytecode
+# Python cache
 __pycache__/
 *.pyc
 
 # Streamlit cache
 .streamlit/
-
-# VSCode stuff
-.vscode/
-
-# Model outputs (optional)
-models/*.pkl
-
-# OS files
-Thumbs.db
