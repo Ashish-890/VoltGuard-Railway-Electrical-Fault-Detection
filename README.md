@@ -7,9 +7,6 @@
 
 <div align="center">
 
-<img src="https://img.shields.io/github/stars/Ashish-890/VoltGuard-Railway-Electrical-Fault-Detection?style=for-the-badge">
-<img src="https://img.shields.io/github/forks/Ashish-890/VoltGuard-Railway-Electrical-Fault-Detection?style=for-the-badge">
-<img src="https://img.shields.io/github/issues/Ashish-890/VoltGuard-Railway-Electrical-Fault-Detection?style=for-the-badge">
 <img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge">
 <img src="https://img.shields.io/badge/Python-3.10+-yellow?style=for-the-badge">
 <img src="https://img.shields.io/badge/Streamlit-App-red?style=for-the-badge">
