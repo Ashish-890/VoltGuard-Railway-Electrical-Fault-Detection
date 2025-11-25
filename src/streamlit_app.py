@@ -6,7 +6,7 @@ import joblib
 import pandas as pd
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageFilter
+from PIL import Image, ImageFilter, ImageStat  # ⬅️ added ImageStat
 
 # ================== CONFIG & MODEL LOADING ==================
 
@@ -317,31 +317,40 @@ def add_reading_to_history(
         }
     )
 
-# ================== IMAGE "AI" ANALYZER ==================
+# ================== IMAGE "AI" ANALYZER (IMPROVED HEURISTICS) ==================
 
 
 def analyze_component_image(img: Image.Image, component_type: str) -> Dict:
     """
     Heuristic 'AI' that:
     - Detects bill / document-like images.
-    - Estimates condition using brightness, contrast, edge strength.
+    - Estimates condition using brightness, contrast, dark patches, rust-like colors and edge strength.
+    This is a smart demo – not a trained CV model.
     """
-    gray = img.convert("L").resize((256, 256))
-    arr = np.array(gray) / 255.0
 
-    mean_brightness = float(arr.mean())
-    contrast = float(arr.std())
+    # Work in RGB and grayscale, resize for stable analysis
+    img_rgb = img.convert("RGB").resize((512, 512))
+    gray = img_rgb.convert("L")
+    gray_arr = np.array(gray) / 255.0
 
+    # Brightness & contrast
+    stat = ImageStat.Stat(gray)
+    mean_brightness = float(stat.mean[0] / 255.0)  # normalize 0–1
+    contrast = float(stat.stddev[0] / 255.0)
+
+    # Edge strength (for cracks / roughness)
     edges = gray.filter(ImageFilter.FIND_EDGES)
     edges_arr = np.array(edges) / 255.0
     edge_strength = float(edges_arr.mean())
 
-    white_fraction = float((arr > 0.9).mean())
+    # White area fraction (for document-like images)
+    white_fraction = float((gray_arr > 0.9).mean())
 
+    # ---- Detect document-like images first ----
     looks_like_document = (
-        white_fraction > 0.5
-        and contrast < 0.28
-        and 0.08 < edge_strength < 0.35
+        white_fraction > 0.45
+        and contrast < 0.23
+        and 0.06 < edge_strength < 0.30
     )
 
     if looks_like_document:
@@ -350,8 +359,8 @@ def analyze_component_image(img: Image.Image, component_type: str) -> Dict:
             "severity": 0.0,
             "summary": "This image looks more like a **document or bill** than a physical railway component.",
             "issues": [
-                "Large bright/white background like paper",
-                "Edge patterns resemble text/lines, not hardware geometry",
+                "Large bright/white background similar to paper",
+                "Low contrast with edge patterns resembling text or lines",
             ],
             "recommendation": (
                 "Upload a close-up photo of the actual component "
@@ -362,46 +371,98 @@ def analyze_component_image(img: Image.Image, component_type: str) -> Dict:
                 "contrast": contrast,
                 "edge_strength": edge_strength,
                 "white_fraction": white_fraction,
+                "rust_ratio": 0.0,
+                "dark_ratio": 0.0,
+                "very_dark_ratio": 0.0,
                 "detected_type": "document-like",
             },
         }
 
+    # ---- Component-like image: apply richer heuristics ----
+
+    arr_rgb = np.array(img_rgb).astype(np.float32) / 255.0
+    r = arr_rgb[:, :, 0]
+    g = arr_rgb[:, :, 1]
+    b = arr_rgb[:, :, 2]
+
+    # Dark/burnt regions
+    dark_mask = gray_arr < 0.20
+    very_dark_mask = gray_arr < 0.10
+    dark_ratio = float(dark_mask.mean())
+    very_dark_ratio = float(very_dark_mask.mean())
+
+    # Rust-like colors (brown/orange dominant)
+    rust_mask = (
+        (r > 0.35) & (r < 0.9) &   # red reasonably strong
+        (g > 0.20) & (g < 0.75) &  # some green
+        (b < 0.55) &               # blue relatively low
+        (r > g + 0.05) &           # red a bit above green
+        (r > b + 0.10)             # red clearly above blue
+    )
+    rust_ratio = float(rust_mask.mean())
+
+    # Simple texture estimate (difference of neighbors)
+    diff_h = np.abs(arr_rgb[:, 1:, :] - arr_rgb[:, :-1, :]).mean()
+    diff_v = np.abs(arr_rgb[1:, :, :] - arr_rgb[:-1, :, :]).mean()
+    texture_score = float((diff_h + diff_v) / 2.0)
+
     issues: List[str] = []
     severity = 0.0
 
-    if mean_brightness < 0.25:
-        issues.append("Dark / burnt-looking zones detected on surface")
+    # Burn / charring suspicion
+    if very_dark_ratio > 0.02 or (dark_ratio > 0.06 and contrast > 0.22 and mean_brightness < 0.55):
+        issues.append("Dark, possibly burnt / carbonized regions detected on surface.")
         severity += 0.45
-    elif mean_brightness > 0.85:
-        issues.append("Very bright / washed-out image (flash or glare)")
-        severity += 0.2
 
+    # Rust / corrosion suspicion
+    if rust_ratio > 0.04:
+        issues.append("Significant rust / corrosion patterns detected.")
+        severity += 0.35
+    elif rust_ratio > 0.02:
+        issues.append("Mild rust-like discoloration detected.")
+        severity += 0.18
+
+    # High contrast / hotspots / stains
     if contrast > 0.28:
-        issues.append("High contrast – stains, deposits or hotspot patterns")
-        severity += 0.25
+        issues.append("High contrast – stains, deposits or hotspot-like intensity patterns.")
+        severity += 0.20
 
-    if edge_strength > 0.22:
-        issues.append("Strong edges – possible cracks, chipped parts or frayed strands")
-        severity += 0.25
+    # Strong edges / cracks
+    if edge_strength > 0.28 or texture_score > 0.20:
+        issues.append("Strong edges / rough textures – possible cracks, chipping or frayed strands.")
+        severity += 0.20
 
+    # Overly bright (glare or flash)
+    if mean_brightness > 0.85:
+        issues.append("Very bright / washed-out image – glare or flash may hide defects.")
+        severity += 0.10
+
+    # If nothing specific found, treat as visually normal
     if not issues:
-        issues.append("No obvious damage patterns detected from this image")
+        issues.append("No strong visual damage patterns detected.")
+        severity += 0.05  # tiny base so it's never exactly 0
 
+    # Clamp severity in [0, 1]
     severity = max(0.0, min(severity, 1.0))
 
+    # Status & narrative
     if severity < 0.3:
         status = "Normal"
-        summary = f"The **{component_type}** appears visually healthy."
-        recommendation = "Keep under routine inspection. No immediate action needed."
+        summary = f"The **{component_type}** appears visually healthy with no major rust/burn patterns."
+        recommendation = "Keep under routine inspection and cross-check with electrical readings."
     elif severity < 0.6:
         status = "Needs Attention"
-        summary = f"The **{component_type}** shows minor anomalies worth checking."
-        recommendation = "Plan a closer inspection during the next maintenance block."
+        summary = f"The **{component_type}** shows visual anomalies that justify closer inspection."
+        recommendation = (
+            "Schedule an on-site inspection in the next maintenance window. "
+            "Check for early-stage corrosion, tracking, or mechanical looseness."
+        )
     else:
         status = "Faulty"
-        summary = f"The **{component_type}** likely has significant damage / contamination."
+        summary = f"The **{component_type}** likely has significant visual degradation (corrosion/burn/cracks)."
         recommendation = (
-            "Treat as a high-priority check. Follow OHE/traction safety SOP before any intervention."
+            "Treat as high priority. Follow OHE/traction safety SOP, consider isolation and replacement "
+            "after detailed inspection."
         )
 
     return {
@@ -415,6 +476,10 @@ def analyze_component_image(img: Image.Image, component_type: str) -> Dict:
             "contrast": contrast,
             "edge_strength": edge_strength,
             "white_fraction": white_fraction,
+            "rust_ratio": rust_ratio,
+            "dark_ratio": dark_ratio,
+            "very_dark_ratio": very_dark_ratio,
+            "texture_score": texture_score,
             "detected_type": "component-like",
         },
     }
@@ -1129,7 +1194,7 @@ else:  # "About / GitHub"
         **VoltGuard** is a concept application for **Railway Electrical Fault Detection** with:
 
         - 🔬 ML-based classification of sensor readings (Random Forest demo model).  
-        - 📷 On-device visual inspection using simple image heuristics.  
+        - 📷 On-device visual inspection using heuristic image analysis (burn / rust / crack cues).  
         - 🚋 OHE diagnostics: voltage health, catenary load, insulator & clamp stress, flashover risk.  
         - 📡 Quick Scan, bulk CSV analysis & simulated IoT telemetry.  
         - 📜 History, analytics and a basic fault register view.  
@@ -1137,7 +1202,7 @@ else:  # "About / GitHub"
         You can present this as:
 
         > “End-to-end railway electrical fault detection demo with VoltGuard branding –  
-        > ML classification + image inspection + OHE diagnostics + telemetry dashboard, built in Streamlit.”
+        > ML classification + image inspection + OHE diagnostics + telemetry dashboard, built in Streamlit.”  
         """
     )
 
